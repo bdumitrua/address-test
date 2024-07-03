@@ -12,6 +12,15 @@ use App\Models\Address;
 
 class AddressController extends Controller
 {
+    private $client;
+    private $apiKey;
+
+    public function __construct()
+    {
+        $this->client = new Client();
+        $this->apiKey = env('YANDEX_API_KEY');
+    }
+
     public function index()
     {
         return view('address');
@@ -19,65 +28,50 @@ class AddressController extends Controller
 
     public function getInfo(Request $request)
     {
+        $address = $this->validateAndCleanAddress($request);
+
+        $resultsCacheKey = 'results.' . $address;
+        $results = Cache::remember($resultsCacheKey, now()->addDay(), function () use ($address) {
+            return $this->fetchAddressData($address);
+        });
+
+        return view('address', ['results' => $results, 'address' => $address]);
+    }
+
+    private function validateAndCleanAddress(Request $request)
+    {
         $validatedData = $request->validate([
             'address' => 'required|string|min:5|max:255',
         ]);
-        $address = trim(preg_replace('/\s+/', ' ', $validatedData['address']));
-
-        $client = new Client();
-        $apiKey = env('YANDEX_API_KEY');
-
-        $results = [];
-        $errorMessage = null;
-
-        $resultsCacheKey = 'results.' . $address;
-        if (Cache::has($resultsCacheKey)) {
-            $results = Cache::get($resultsCacheKey);
-        } else {
-            try {
-                $geoObjects = $this->fetchGeoObjects($client, $apiKey, $address);
-
-                foreach ($geoObjects as $geoObject) {
-                    $formattedAddress = $this->getFormattedAddress($geoObject);
-                    list($street, $house, $district) = $this->extractAddressComponents($geoObject);
-                    $cords = $this->extractCoordinates($geoObject);
-
-                    $metroStations = $this->fetchMetroStations($client, $apiKey, $cords);
-
-                    // Сохранение входящего запроса в базу данных
-                    if (!Address::where('searched_address', $address)->exists()) {
-                        Address::create(['searched_address' => $address]);
-                    }
-
-                    $results[] = [
-                        'formatted_address' => $formattedAddress,
-                        'street' => $street,
-                        'house' => $house,
-                        'district' => $district,
-                        'metroStations' => $metroStations
-                    ];
-                }
-
-                Cache::put('results.' . $address, $results, now()->addDay());
-            } catch (RequestException $e) {
-                Log::error('Ошибка при запросе к API Яндекс.Карт: ' . $e->getMessage());
-
-                $errorMessage = 'Ошибка при запросе к API Яндекс.Карт. Пожалуйста, попробуйте позже.';
-            } catch (NotFoundHttpException $e) {
-                $errorMessage = 'Ошибка при запросе к API Яндекс.Карт: данных по указаному адресу не найдено.';
-            }
-        }
-
-        return view('address', compact('results', 'address', 'errorMessage'));
+        return trim(preg_replace('/\s+/', ' ', $validatedData['address']));
     }
 
-    private function fetchGeoObjects(Client $client, $apiKey, $address)
+    private function fetchAddressData($address)
     {
-        $response = $client->get("https://geocode-maps.yandex.ru/1.x/", [
+        try {
+            $geoObjects = $this->fetchGeoObjects($address);
+
+            $results = [];
+            foreach ($geoObjects as $geoObject) {
+                $results[] = $this->formatGeoObject($geoObject, $address);
+            }
+
+            return $results;
+        } catch (RequestException $e) {
+            Log::error('Ошибка при запросе к API Яндекс.Карт: ' . $e->getMessage());
+            throw new \Exception('Ошибка при запросе к API Яндекс.Карт. Пожалуйста, попробуйте позже.');
+        } catch (NotFoundHttpException $e) {
+            throw new \Exception('Ошибка при запросе к API Яндекс.Карт: данных по указанному адресу не найдено.');
+        }
+    }
+
+    private function fetchGeoObjects($address)
+    {
+        $response = $this->client->get("https://geocode-maps.yandex.ru/1.x/", [
             'query' => [
                 'geocode' => $address,
                 'format' => 'json',
-                'apikey' => $apiKey,
+                'apikey' => $this->apiKey,
                 'results' => 5
             ]
         ]);
@@ -90,6 +84,25 @@ class AddressController extends Controller
         return array_map(function ($featureMember) {
             return $featureMember['GeoObject'];
         }, $data['response']['GeoObjectCollection']['featureMember']);
+    }
+
+    private function formatGeoObject($geoObject, $address)
+    {
+        $formattedAddress = $this->getFormattedAddress($geoObject);
+        list($street, $house, $district) = $this->extractAddressComponents($geoObject);
+        $cords = $this->extractCoordinates($geoObject);
+
+        $metroStations = $this->fetchMetroStations($cords);
+
+        $this->saveSearchedAddress($address);
+
+        return [
+            'formatted_address' => $formattedAddress,
+            'street' => $street,
+            'house' => $house,
+            'district' => $district,
+            'metroStations' => $metroStations
+        ];
     }
 
     private function getFormattedAddress($geoObject)
@@ -124,13 +137,13 @@ class AddressController extends Controller
         return join(',', $cords);
     }
 
-    private function fetchMetroStations(Client $client, $apiKey, $cords)
+    private function fetchMetroStations($cords)
     {
-        $response = $client->get("https://geocode-maps.yandex.ru/1.x/", [
+        $response = $this->client->get("https://geocode-maps.yandex.ru/1.x/", [
             'query' => [
                 'geocode' => $cords,
                 'format' => 'json',
-                'apikey' => $apiKey,
+                'apikey' => $this->apiKey,
                 'kind' => 'metro',
                 'results' => 5
             ]
@@ -138,5 +151,12 @@ class AddressController extends Controller
 
         $data = json_decode($response->getBody(), true);
         return $data['response']['GeoObjectCollection']['featureMember'];
+    }
+
+    private function saveSearchedAddress($address)
+    {
+        if (!Address::where('searched_address', $address)->exists()) {
+            Address::create(['searched_address' => $address]);
+        }
     }
 }
