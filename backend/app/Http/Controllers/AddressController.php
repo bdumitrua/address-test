@@ -6,6 +6,7 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Http\Request;
+use Illuminate\Contracts\View\View;
 use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Client;
 use App\Models\Address;
@@ -21,24 +22,36 @@ class AddressController extends Controller
         $this->apiKey = env('YANDEX_API_KEY');
     }
 
-    public function index()
+    public function index(): View
     {
         return view('address');
     }
 
-    public function getInfo(Request $request)
+    public function getInfo(Request $request): View
     {
         $address = $this->validateAndCleanAddress($request);
 
         $resultsCacheKey = 'results.' . $address;
-        $results = Cache::remember($resultsCacheKey, now()->addDay(), function () use ($address) {
-            return $this->fetchAddressData($address);
+        $errorMessage = null;
+
+        $results = Cache::remember($resultsCacheKey, now()->addDay(), function () use ($address, &$errorMessage) {
+            try {
+                return $this->fetchAddressData($address);
+            } catch (RequestException $e) {
+                Log::error('Ошибка при запросе к API Яндекс.Карт: ' . $e->getMessage());
+                $errorMessage = 'Ошибка при запросе к API Яндекс.Карт. Пожалуйста, попробуйте позже.';
+            } catch (NotFoundHttpException $e) {
+                $errorMessage = 'Ошибка при запросе к API Яндекс.Карт: данных по указанному адресу не найдено.';
+            } catch (\Throwable $e) {
+                Log::error('Непредвиденная ошибка при запросе к API Яндекс.Карт:' . $e->getMessage());
+                $errorMessage = 'Непредвиденная ошибка: ' . $e->getMessage();
+            }
         });
 
-        return view('address', ['results' => $results, 'address' => $address]);
+        return view('address', ['results' => $results, 'address' => $address, 'errorMessage' => $errorMessage]);
     }
 
-    private function validateAndCleanAddress(Request $request)
+    private function validateAndCleanAddress(Request $request): string
     {
         $validatedData = $request->validate([
             'address' => 'required|string|min:5|max:255',
@@ -46,26 +59,22 @@ class AddressController extends Controller
         return trim(preg_replace('/\s+/', ' ', $validatedData['address']));
     }
 
-    private function fetchAddressData($address)
+    private function fetchAddressData(string $address): array
     {
-        try {
-            $geoObjects = $this->fetchGeoObjects($address);
+        $geoObjects = $this->fetchGeoObjects($address);
 
-            $results = [];
-            foreach ($geoObjects as $geoObject) {
-                $results[] = $this->formatGeoObject($geoObject, $address);
-            }
-
-            return $results;
-        } catch (RequestException $e) {
-            Log::error('Ошибка при запросе к API Яндекс.Карт: ' . $e->getMessage());
-            throw new \Exception('Ошибка при запросе к API Яндекс.Карт. Пожалуйста, попробуйте позже.');
-        } catch (NotFoundHttpException $e) {
-            throw new \Exception('Ошибка при запросе к API Яндекс.Карт: данных по указанному адресу не найдено.');
+        $results = [];
+        foreach ($geoObjects as $geoObject) {
+            $results[] = $this->formatGeoObject($geoObject, $address);
         }
+
+        return $results;
     }
 
-    private function fetchGeoObjects($address)
+    /**
+     * @throws NotFoundHttpException
+     */
+    private function fetchGeoObjects(string $address): array
     {
         $response = $this->client->get("https://geocode-maps.yandex.ru/1.x/", [
             'query' => [
@@ -86,7 +95,7 @@ class AddressController extends Controller
         }, $data['response']['GeoObjectCollection']['featureMember']);
     }
 
-    private function formatGeoObject($geoObject, $address)
+    private function formatGeoObject(array $geoObject, string $address): array
     {
         $formattedAddress = $this->getFormattedAddress($geoObject);
         list($street, $house, $district) = $this->extractAddressComponents($geoObject);
@@ -105,12 +114,12 @@ class AddressController extends Controller
         ];
     }
 
-    private function getFormattedAddress($geoObject)
+    private function getFormattedAddress(array $geoObject): string
     {
         return $geoObject['metaDataProperty']['GeocoderMetaData']['Address']['formatted'];
     }
 
-    private function extractAddressComponents($geoObject)
+    private function extractAddressComponents(array $geoObject): array
     {
         $addressComponents = $geoObject['metaDataProperty']['GeocoderMetaData']['Address']['Components'];
         $street = '';
@@ -130,14 +139,14 @@ class AddressController extends Controller
         return [$street, $house, $district];
     }
 
-    private function extractCoordinates($geoObject)
+    private function extractCoordinates(array $geoObject): string
     {
         $cords = $geoObject['Point']['pos'];
         $cords = explode(' ', $cords);
         return join(',', $cords);
     }
 
-    private function fetchMetroStations($cords)
+    private function fetchMetroStations(string $cords): array
     {
         $response = $this->client->get("https://geocode-maps.yandex.ru/1.x/", [
             'query' => [
@@ -153,7 +162,7 @@ class AddressController extends Controller
         return $data['response']['GeoObjectCollection']['featureMember'];
     }
 
-    private function saveSearchedAddress($address)
+    private function saveSearchedAddress(string $address): void
     {
         if (!Address::where('searched_address', $address)->exists()) {
             Address::create(['searched_address' => $address]);
