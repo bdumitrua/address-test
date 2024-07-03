@@ -9,5 +9,5 @@ class Address extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['formatted_address'];
+    protected $fillable = ['searched_address'];
 }

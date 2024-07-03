@@ -1,0 +1,49 @@
+services:
+    backend:
+        build:
+            context: ./backend
+            dockerfile: Dockerfile
+        ports:
+            - "8000:8000"
+        volumes:
+            - ./backend:/app
+            - backend-vendor:/app/vendor
+        depends_on:
+            - mysql
+            - redis
+        networks:
+            - app
+
+    mysql:
+        image: mysql:8.3
+        environment:
+            MYSQL_DATABASE: address-db
+            MYSQL_USER: user
+            MYSQL_PASSWORD: password
+            MYSQL_ROOT_PASSWORD: rootpassword
+        ports:
+            - "3306:3306"
+        volumes:
+            - sql-data:/var/lib/mysql
+        restart: unless-stopped
+        networks:
+            - app
+
+    redis:
+        image: redis:7.2.3
+        command: redis-server /etc/redis/redis.conf
+        ports:
+            - 6379:6379
+        volumes:
+            - ./redis/redis.conf:/etc/redis/redis.conf
+        restart: unless-stopped
+        networks:
+            - app
+
+networks:
+    app:
+        driver: bridge
+
+volumes:
+    sql-data:
+    backend-vendor:
